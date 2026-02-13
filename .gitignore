@@ -1,0 +1,22 @@
+# dependencies
+node_modules/
+
+# env
+.env
+.env.*
+!.env.example
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# runtime uploads (keep out of git)
+uploads/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
