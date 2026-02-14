@@ -71,42 +71,47 @@ courseSchema.pre('save', function(next) {
   next();
 });
 
-courseSchema.post('save', async function(doc) {
+courseSchema.post('save', function(doc) {
   if (!doc?.$locals?.wasNew) return;
 
-  try {
-    const User = mongoose.model('User');
-    const users = await User.find({ status: 'active', role: 'student' }).select('name email').lean();
-    const deliverableUsers = users.filter((user) => user.email && !isPlaceholderEmail(user.email));
+  // Run notifications in the background so API requests don't hang on SMTP/network I/O.
+  setImmediate(() => {
+    void (async () => {
+      try {
+        const User = mongoose.model('User');
+        const users = await User.find({ status: 'active', role: 'student' }).select('name email').lean();
+        const deliverableUsers = users.filter((user) => user.email && !isPlaceholderEmail(user.email));
 
-    if (!deliverableUsers.length) {
-      console.log(
-        `[mail] Course "${doc.title}" notification skipped. totalStudents=${users.length}, deliverable=0`
-      );
-      return;
-    }
+        if (!deliverableUsers.length) {
+          console.log(
+            `[mail] Course "${doc.title}" notification skipped. totalStudents=${users.length}, deliverable=0`
+          );
+          return;
+        }
 
-    const results = await Promise.allSettled(
-      deliverableUsers.map((user) =>
-        sendNewCourseAnnouncementEmail({
-          to: user.email,
-          userName: user.name,
-          courseTitle: doc.title,
-          description: doc.description,
-          price: doc.price,
-          status: doc.status
-        })
-      )
-    );
+        const results = await Promise.allSettled(
+          deliverableUsers.map((user) =>
+            sendNewCourseAnnouncementEmail({
+              to: user.email,
+              userName: user.name,
+              courseTitle: doc.title,
+              description: doc.description,
+              price: doc.price,
+              status: doc.status
+            })
+          )
+        );
 
-    const failed = results.filter((result) => result.status === 'rejected').length;
-    const sent = results.length - failed;
-    console.log(
-      `[mail] Course "${doc.title}" notification summary: attempted=${results.length}, sent=${sent}, failed=${failed}`
-    );
-  } catch (error) {
-    console.error('Course post-save notification error:', error.message);
-  }
+        const failed = results.filter((result) => result.status === 'rejected').length;
+        const sent = results.length - failed;
+        console.log(
+          `[mail] Course "${doc.title}" notification summary: attempted=${results.length}, sent=${sent}, failed=${failed}`
+        );
+      } catch (error) {
+        console.error('Course post-save notification error:', error.message);
+      }
+    })();
+  });
 });
 
 module.exports = mongoose.model('Course', courseSchema);

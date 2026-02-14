@@ -28,7 +28,7 @@ const levelSchema = new mongoose.Schema({
   },
   videoPath: {
     type: String, // Path to uploaded video file
-    required: [true, 'Video is required for this level']
+    default: null
   },
   videoDuration: {
     type: Number, // Duration in seconds

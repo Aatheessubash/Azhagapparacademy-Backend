@@ -122,6 +122,9 @@ router.get('/', authenticate, async (req, res) => {
 
         return {
           ...courseObj,
+          // Only return the YouTube embed URL after the course is unlocked.
+          // This keeps it hidden for unpaid users (UI also gates it).
+          youtubeEmbedUrl: hasAccess ? courseObj.youtubeEmbedUrl : null,
           totalLevels,
           paymentStatus: payment ? payment.status : (isFree ? 'free' : 'unpaid'),
           hasAccess,
@@ -191,6 +194,8 @@ router.get('/:id', authenticate, async (req, res) => {
 
     const courseResponse = {
       ...course.toObject(),
+      // Only return YouTube embed URL after unlock (paid/free/admin).
+      youtubeEmbedUrl: hasAccess ? course.youtubeEmbedUrl : null,
       levels: safeLevels,
       paymentStatus: payment ? payment.status : (isFree ? 'free' : 'unpaid'),
       hasAccess,

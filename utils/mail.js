@@ -11,6 +11,10 @@ const transporter = isMailConfigured
       port: 465,
       secure: true,
       family: 4,
+      // Avoid requests hanging forever when SMTP is slow/unreachable.
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 20000,
       auth: {
         user: mailUser,
         pass: mailAppPassword

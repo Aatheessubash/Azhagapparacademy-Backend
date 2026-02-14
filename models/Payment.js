@@ -147,49 +147,54 @@ paymentSchema.pre('save', async function(next) {
   next();
 });
 
-paymentSchema.post('save', async function(doc) {
-  try {
-    const User = mongoose.model('User');
-    const Course = mongoose.model('Course');
+paymentSchema.post('save', function(doc) {
+  // Run notifications in the background so API requests don't hang on SMTP/network I/O.
+  setImmediate(() => {
+    void (async () => {
+      try {
+        const User = mongoose.model('User');
+        const Course = mongoose.model('Course');
 
-    const [user, course] = await Promise.all([
-      User.findById(doc.userId).select('name email').lean(),
-      Course.findById(doc.courseId).select('title').lean()
-    ]);
+        const [user, course] = await Promise.all([
+          User.findById(doc.userId).select('name email').lean(),
+          Course.findById(doc.courseId).select('title').lean()
+        ]);
 
-    if (!user || !course?.title) return;
+        if (!user || !course?.title) return;
 
-    if (doc.$locals?.wasNew) {
-      await notifyPaymentSubmitted({ User, user, course, doc });
-      return;
-    }
+        if (doc.$locals?.wasNew) {
+          await notifyPaymentSubmitted({ User, user, course, doc });
+          return;
+        }
 
-    const isRejectedToPendingResubmission =
-      doc.$locals?.statusChanged &&
-      doc.$locals?.previousStatus === 'rejected' &&
-      doc.status === 'pending';
+        const isRejectedToPendingResubmission =
+          doc.$locals?.statusChanged &&
+          doc.$locals?.previousStatus === 'rejected' &&
+          doc.status === 'pending';
 
-    if (isRejectedToPendingResubmission) {
-      await notifyPaymentSubmitted({ User, user, course, doc });
-      return;
-    }
+        if (isRejectedToPendingResubmission) {
+          await notifyPaymentSubmitted({ User, user, course, doc });
+          return;
+        }
 
-    if (doc.$locals?.statusChanged) {
-      await sendPaymentStatusEmail({
-        to: user.email,
-        userName: user.name,
-        courseTitle: course.title,
-        amount: doc.amount,
-        status: doc.status,
-        rejectionReason: doc.rejectionReason
-      });
-      console.log(
-        `[mail] Payment status email sent: ${user.email} (${doc._id}) ${doc.$locals?.previousStatus || 'unknown'} -> ${doc.status}`
-      );
-    }
-  } catch (error) {
-    console.error('Payment post-save notification error:', error.message);
-  }
+        if (doc.$locals?.statusChanged) {
+          await sendPaymentStatusEmail({
+            to: user.email,
+            userName: user.name,
+            courseTitle: course.title,
+            amount: doc.amount,
+            status: doc.status,
+            rejectionReason: doc.rejectionReason
+          });
+          console.log(
+            `[mail] Payment status email sent: ${user.email} (${doc._id}) ${doc.$locals?.previousStatus || 'unknown'} -> ${doc.status}`
+          );
+        }
+      } catch (error) {
+        console.error('Payment post-save notification error:', error.message);
+      }
+    })();
+  });
 });
 
 paymentSchema.pre('findOneAndUpdate', async function(next) {
@@ -202,36 +207,39 @@ paymentSchema.pre('findOneAndUpdate', async function(next) {
   next();
 });
 
-paymentSchema.post('findOneAndUpdate', async function(doc) {
-  if (!doc) return;
-
+paymentSchema.post('findOneAndUpdate', function(doc) {
   const previous = this.getOptions()._previousPayment;
-  const statusChanged = previous && previous.status !== doc.status;
+  const statusChanged = doc && previous && previous.status !== doc.status;
   if (!statusChanged) return;
 
-  try {
-    const User = mongoose.model('User');
-    const Course = mongoose.model('Course');
-    const [user, course] = await Promise.all([
-      User.findById(doc.userId).select('name email').lean(),
-      Course.findById(doc.courseId).select('title').lean()
-    ]);
+  // Run notifications in the background so API requests don't hang on SMTP/network I/O.
+  setImmediate(() => {
+    void (async () => {
+      try {
+        const User = mongoose.model('User');
+        const Course = mongoose.model('Course');
+        const [user, course] = await Promise.all([
+          User.findById(doc.userId).select('name email').lean(),
+          Course.findById(doc.courseId).select('title').lean()
+        ]);
 
-    if (!user?.email || !course?.title) return;
+        if (!user?.email || !course?.title) return;
 
-    await sendPaymentStatusEmail({
-      to: user.email,
-      userName: user.name,
-      courseTitle: course.title,
-      amount: doc.amount,
-      status: doc.status,
-      rejectionReason: doc.rejectionReason
-    });
+        await sendPaymentStatusEmail({
+          to: user.email,
+          userName: user.name,
+          courseTitle: course.title,
+          amount: doc.amount,
+          status: doc.status,
+          rejectionReason: doc.rejectionReason
+        });
 
-    console.log(`[mail] Payment status email sent (findOneAndUpdate): ${user.email} ${previous.status} -> ${doc.status}`);
-  } catch (error) {
-    console.error('Payment findOneAndUpdate notification error:', error.message);
-  }
+        console.log(`[mail] Payment status email sent (findOneAndUpdate): ${user.email} ${previous.status} -> ${doc.status}`);
+      } catch (error) {
+        console.error('Payment findOneAndUpdate notification error:', error.message);
+      }
+    })();
+  });
 });
 
 module.exports = mongoose.model('Payment', paymentSchema);

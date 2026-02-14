@@ -92,7 +92,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       description,
       levelNumber,
       quizEnabled: quizEnabled || false,
-      videoPath: 'pending', // Placeholder until video is uploaded
+      videoPath: null, // Uploaded later
       status: 'active'
     });
 
@@ -188,8 +188,8 @@ router.post('/:id/video',
 router.get('/:id/stream', authenticate, async (req, res) => {
   try {
     const level = await Level.findById(req.params.id);
-    if (!level || !level.videoPath) {
-      return res.status(404).json({ message: 'Video not found' });
+    if (!level || !level.videoPath || level.videoPath === 'pending') {
+      return res.status(404).json({ message: 'Video not uploaded yet' });
     }
 
     const course = await Course.findById(level.courseId);
