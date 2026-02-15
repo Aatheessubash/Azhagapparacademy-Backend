@@ -172,7 +172,8 @@ router.get('/students/:id/progress', authenticate, requireAdmin, async (req, res
       .populate('courseId', 'title')
       .sort({ updatedAt: -1 });
 
-    res.json({ progress });
+    // Defensive: filter out orphaned progress entries (e.g., course deleted).
+    res.json({ progress: progress.filter((entry) => entry.courseId) });
   } catch (error) {
     console.error('Get student progress error:', error);
     res.status(500).json({ message: 'Server error' });

@@ -54,7 +54,8 @@ router.get('/my-progress', authenticate, async (req, res) => {
       .populate('courseId', 'title thumbnail')
       .sort({ updatedAt: -1 });
 
-    res.json({ progress });
+    // Defensive: filter out orphaned progress entries (e.g., course deleted).
+    res.json({ progress: progress.filter((entry) => entry.courseId) });
   } catch (error) {
     console.error('Get my progress error:', error);
     res.status(500).json({ message: 'Server error' });
