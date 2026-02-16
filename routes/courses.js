@@ -223,6 +223,12 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
   try {
     const { title, description, price, quizEnabled, status, youtubeEmbedUrl } = req.body;
 
+    const safeTitle = typeof title === 'string' ? title.trim() : '';
+    const safeDescription = typeof description === 'string' ? description.trim() : '';
+    if (!safeTitle || !safeDescription) {
+      return res.status(400).json({ message: 'Title and description are required' });
+    }
+
     const numericPrice = price !== undefined ? Number(price) : 0;
     if (Number.isNaN(numericPrice) || numericPrice < 0) {
       return res.status(400).json({ message: 'Price must be 0 for free or greater than 0 for paid courses' });
@@ -237,8 +243,8 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
     const safeStatus = allowedStatuses.includes(status) ? status : 'draft';
 
     const course = await Course.create({
-      title,
-      description,
+      title: safeTitle,
+      description: safeDescription,
       price: numericPrice,
       quizEnabled: quizEnabled || false,
       youtubeEmbedUrl: parsedYouTube.hasValue ? parsedYouTube.url : null,
@@ -248,6 +254,10 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
     res.status(201).json(course);
   } catch (error) {
     console.error('Create course error:', error);
+    if (error?.name === 'ValidationError') {
+      const firstMessage = Object.values(error.errors || {})[0]?.message || 'Invalid course data';
+      return res.status(400).json({ message: firstMessage });
+    }
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
