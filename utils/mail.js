@@ -1,26 +1,111 @@
 const nodemailer = require('nodemailer');
 
-const mailUser = process.env.MAIL_USER || '';
-const mailAppPassword = (process.env.MAIL_APP_PASSWORD || '').replace(/\s+/g, '');
+const parseBoolean = (value, fallback = false) => {
+  if (typeof value !== 'string') return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+};
 
-const isMailConfigured = Boolean(mailUser && mailAppPassword);
+const normalizeAddress = (value) => (typeof value === 'string' ? value.trim() : '');
+const isAbsoluteHttpUrl = (value) => typeof value === 'string' && /^https?:\/\//i.test(value.trim());
 
-const transporter = isMailConfigured
+const mailProvider = (process.env.MAIL_PROVIDER || '').trim().toLowerCase();
+const mailFrom = normalizeAddress(process.env.MAIL_FROM || process.env.MAIL_USER || process.env.SMTP_USER || '');
+
+// SMTP configuration (works for Gmail and custom SMTP providers)
+const smtpHost = normalizeAddress(process.env.MAIL_HOST || process.env.SMTP_HOST || '');
+const smtpService = normalizeAddress(process.env.MAIL_SERVICE || process.env.SMTP_SERVICE || '');
+const smtpUser = normalizeAddress(process.env.MAIL_USER || process.env.SMTP_USER || '');
+const smtpPassword = normalizeAddress(
+  process.env.MAIL_APP_PASSWORD || process.env.MAIL_PASSWORD || process.env.SMTP_PASS || ''
+).replace(/\s+/g, '');
+
+const configuredPort = Number(process.env.MAIL_PORT || process.env.SMTP_PORT);
+const defaultPort = smtpHost ? 587 : 465;
+const smtpPort = Number.isFinite(configuredPort) && configuredPort > 0 ? configuredPort : defaultPort;
+
+const smtpSecure = parseBoolean(
+  process.env.MAIL_SECURE ?? process.env.SMTP_SECURE,
+  smtpPort === 465
+);
+
+const smtpConfigured = Boolean(
+  smtpUser &&
+  smtpPassword &&
+  (smtpHost || smtpService || !mailProvider || mailProvider === 'smtp' || mailProvider === 'gmail')
+);
+
+// Resend (API-based email, useful on hosts that block SMTP ports)
+const resendApiKey = normalizeAddress(process.env.RESEND_API_KEY || '');
+const resendConfigured = Boolean(resendApiKey && mailFrom);
+
+const prefersResend = mailProvider === 'resend';
+const shouldUseResend = prefersResend ? resendConfigured : (!smtpConfigured && resendConfigured);
+
+const transporter = !shouldUseResend && smtpConfigured
   ? nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
+      service: smtpService || undefined,
+      host: smtpService ? undefined : (smtpHost || 'smtp.gmail.com'),
+      port: smtpService ? undefined : smtpPort,
+      secure: smtpService ? undefined : smtpSecure,
       family: 4,
-      // Avoid requests hanging forever when SMTP is slow/unreachable.
       connectionTimeout: 10000,
       greetingTimeout: 10000,
       socketTimeout: 20000,
       auth: {
-        user: mailUser,
-        pass: mailAppPassword
+        user: smtpUser,
+        pass: smtpPassword
       }
     })
   : null;
+
+let smtpVerifyPromise = null;
+let smtpVerified = false;
+
+const ensureSmtpReady = async () => {
+  if (!transporter || smtpVerified) return;
+  if (smtpVerifyPromise) {
+    await smtpVerifyPromise;
+    return;
+  }
+
+  smtpVerifyPromise = transporter.verify()
+    .then(() => {
+      smtpVerified = true;
+      console.log('[mail] SMTP transport verified.');
+    })
+    .finally(() => {
+      smtpVerifyPromise = null;
+    });
+
+  await smtpVerifyPromise;
+};
+
+const sendViaResend = async ({ to, subject, text, html }) => {
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${resendApiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      from: mailFrom,
+      to: Array.isArray(to) ? to : [to],
+      subject,
+      text,
+      html
+    })
+  });
+
+  if (!response.ok) {
+    const bodyText = await response.text();
+    throw new Error(`Resend API error (${response.status}): ${bodyText}`);
+  }
+
+  return response.json();
+};
 
 const formatINR = (amount) =>
   new Intl.NumberFormat('en-IN', {
@@ -37,18 +122,32 @@ const getPaymentStatusLabel = (status) => {
   return 'Updated';
 };
 
+const buildPublicAssetUrl = (value) => {
+  if (!value) return value;
+  if (isAbsoluteHttpUrl(value)) return value;
+
+  const publicBaseUrl = normalizeAddress(process.env.PUBLIC_BASE_URL).replace(/\/+$/, '');
+  if (!publicBaseUrl) return value;
+  return `${publicBaseUrl}${value.startsWith('/') ? '' : '/'}${value}`;
+};
+
 const sendMail = async ({ to, subject, text, html }) => {
-  if (!isMailConfigured || !transporter) {
-    console.warn('[mail] MAIL_USER/MAIL_APP_PASSWORD not configured. Skipping email send.');
-    return { skipped: true };
-  }
-
   if (!to) {
-    return { skipped: true };
+    return { skipped: true, reason: 'MISSING_RECIPIENT' };
   }
 
+  if (shouldUseResend) {
+    return sendViaResend({ to, subject, text, html });
+  }
+
+  if (!transporter) {
+    console.warn('[mail] No email provider configured. Set SMTP values or RESEND_API_KEY.');
+    return { skipped: true, reason: 'NOT_CONFIGURED' };
+  }
+
+  await ensureSmtpReady();
   return transporter.sendMail({
-    from: process.env.MAIL_FROM || mailUser,
+    from: mailFrom || smtpUser,
     to,
     subject,
     text,
@@ -98,8 +197,7 @@ const sendAdminPaymentSubmittedAlertEmail = async ({
 }) => {
   const subject = `New payment proof submitted - ${courseTitle}`;
   const amountText = formatINR(amount);
-  const publicBaseUrl = (process.env.PUBLIC_BASE_URL || '').toString().trim().replace(/\/+$/, '');
-  const proofUrl = publicBaseUrl && proofImage ? `${publicBaseUrl}${proofImage.startsWith('/') ? '' : '/'}${proofImage}` : proofImage;
+  const proofUrl = buildPublicAssetUrl(proofImage);
   const submittedAtText = new Date(submittedAt || Date.now()).toLocaleString('en-IN', {
     dateStyle: 'medium',
     timeStyle: 'short'

@@ -1,9 +1,13 @@
 const express = require('express');
 const router = express.Router();
-const fs = require('fs');
 const { Course, Payment, Progress, Level, User } = require('../models');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { uploadQRCode, uploadThumbnail, handleUploadError } = require('../middleware/upload');
+const {
+  discardUploadedTempFile,
+  persistUploadedFile,
+  removeStoredLocalUpload
+} = require('../utils/mediaStorage');
 
 const YOUTUBE_VIDEO_ID_REGEX = /^[a-zA-Z0-9_-]{11}$/;
 
@@ -305,7 +309,14 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
       return res.status(404).json({ message: 'Course not found' });
     }
 
+    const oldQrCodePath = course.qrCodeImage;
+    const oldThumbnailPath = course.thumbnail;
     await course.deleteOne();
+    await Promise.all([
+      removeStoredLocalUpload(oldQrCodePath),
+      removeStoredLocalUpload(oldThumbnailPath)
+    ]);
+
     res.json({ message: 'Course removed' });
   } catch (error) {
     console.error('Delete course error:', error);
@@ -322,45 +333,55 @@ router.post('/:id/qr-code',
   uploadQRCode.single('qrCode'),
   handleUploadError,
   async (req, res) => {
+    let uploadPersisted = false;
     try {
       if (!req.file) {
         return res.status(400).json({ message: 'Please upload a file' });
       }
 
+      const course = await Course.findById(req.params.id);
+      if (!course) {
+        await discardUploadedTempFile(req.file);
+        return res.status(404).json({ message: 'Course not found' });
+      }
+
       const { adminPassword } = req.body;
       if (!adminPassword || typeof adminPassword !== 'string') {
-        if (req.file?.path) {
-          fs.unlink(req.file.path, () => {});
-        }
+        await discardUploadedTempFile(req.file);
         return res.status(400).json({ message: 'Admin password is required to change QR code' });
       }
 
       const adminUser = await User.findById(req.user._id).select('+password');
       if (!adminUser) {
-        if (req.file?.path) {
-          fs.unlink(req.file.path, () => {});
-        }
+        await discardUploadedTempFile(req.file);
         return res.status(404).json({ message: 'Admin user not found' });
       }
 
       const isPasswordValid = await adminUser.comparePassword(adminPassword);
       if (!isPasswordValid) {
-        if (req.file?.path) {
-          fs.unlink(req.file.path, () => {});
-        }
+        await discardUploadedTempFile(req.file);
         return res.status(401).json({ message: 'Invalid admin password' });
       }
 
-      const qrCodePath = `/uploads/qr-codes/${req.file.filename}`;
-      
-      const course = await Course.findByIdAndUpdate(
-        req.params.id,
-        { qrCodeImage: qrCodePath },
-        { new: true }
-      );
+      const localQrCodePath = `/uploads/qr-codes/${req.file.filename}`;
+      const persistedQr = await persistUploadedFile({
+        file: req.file,
+        localPath: localQrCodePath,
+        cloudFolder: 'qr-codes',
+        resourceType: 'image'
+      });
+      uploadPersisted = true;
+
+      const oldQrCodePath = course.qrCodeImage;
+      course.qrCodeImage = persistedQr.path;
+      await course.save();
+      await removeStoredLocalUpload(oldQrCodePath);
 
       res.json(course);
     } catch (error) {
+      if (req.file && !uploadPersisted) {
+        await discardUploadedTempFile(req.file);
+      }
       console.error('Upload QR code error:', error);
       res.status(500).json({ message: 'Server error' });
     }
@@ -376,21 +397,37 @@ router.post('/:id/thumbnail',
   uploadThumbnail.single('thumbnail'),
   handleUploadError,
   async (req, res) => {
+    let uploadPersisted = false;
     try {
       if (!req.file) {
         return res.status(400).json({ message: 'Please upload a file' });
       }
 
-      const thumbnailPath = `/uploads/thumbnails/${req.file.filename}`;
-      
-      const course = await Course.findByIdAndUpdate(
-        req.params.id,
-        { thumbnail: thumbnailPath },
-        { new: true }
-      );
+      const course = await Course.findById(req.params.id);
+      if (!course) {
+        await discardUploadedTempFile(req.file);
+        return res.status(404).json({ message: 'Course not found' });
+      }
+
+      const localThumbnailPath = `/uploads/thumbnails/${req.file.filename}`;
+      const persistedThumbnail = await persistUploadedFile({
+        file: req.file,
+        localPath: localThumbnailPath,
+        cloudFolder: 'thumbnails',
+        resourceType: 'image'
+      });
+      uploadPersisted = true;
+
+      const oldThumbnailPath = course.thumbnail;
+      course.thumbnail = persistedThumbnail.path;
+      await course.save();
+      await removeStoredLocalUpload(oldThumbnailPath);
 
       res.json(course);
     } catch (error) {
+      if (req.file && !uploadPersisted) {
+        await discardUploadedTempFile(req.file);
+      }
       console.error('Upload thumbnail error:', error);
       res.status(500).json({ message: 'Server error' });
     }

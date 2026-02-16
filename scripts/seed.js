@@ -5,8 +5,10 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 // Disable outgoing emails during seed unless explicitly allowed.
 if (process.env.SEED_DISABLE_EMAILS !== 'false') {
+  process.env.MAIL_PROVIDER = 'smtp';
   process.env.MAIL_USER = '';
   process.env.MAIL_APP_PASSWORD = '';
+  process.env.RESEND_API_KEY = '';
 }
 
 const { User, Course, Level, Quiz, Payment, Progress } = require('../models');

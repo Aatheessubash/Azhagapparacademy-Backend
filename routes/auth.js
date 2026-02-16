@@ -254,7 +254,7 @@ router.post('/forgot-password/request', async (req, res) => {
         await user.save({ validateBeforeSave: false });
         return res.status(500).json({
           success: false,
-          message: 'Email service is not configured on server.'
+          message: 'Email service is not configured on server. Configure SMTP or Resend.'
         });
       }
     } catch (mailError) {
@@ -265,7 +265,7 @@ router.post('/forgot-password/request', async (req, res) => {
       await user.save({ validateBeforeSave: false });
       return res.status(500).json({
         success: false,
-        message: 'Unable to send OTP mail. Check MAIL_USER/MAIL_APP_PASSWORD and Gmail App Password.'
+        message: 'Unable to send OTP mail. Check server mail provider configuration.'
       });
     }
 

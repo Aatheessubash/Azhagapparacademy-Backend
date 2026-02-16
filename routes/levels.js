@@ -6,16 +6,95 @@ const { Readable } = require('stream');
 const { Level, Payment, Progress, Course } = require('../models');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { uploadVideo, handleUploadError } = require('../middleware/upload');
+const {
+  discardUploadedTempFile,
+  isRemoteUrl,
+  persistUploadedFile,
+  removeStoredLocalUpload
+} = require('../utils/mediaStorage');
 
-const isExternalUrl = (value) => typeof value === 'string' && /^https?:\/\//i.test(value.trim());
+const DRIVE_FILE_ID_REGEX = /^[a-zA-Z0-9_-]{20,}$/;
+
+const EXTRA_ALLOWED_VIDEO_HOSTS = (process.env.ALLOWED_EXTERNAL_VIDEO_HOSTS || '')
+  .split(',')
+  .map((item) => item.trim().toLowerCase())
+  .filter(Boolean);
+
+const ALLOWED_EXTERNAL_VIDEO_HOSTS = new Set([
+  'drive.google.com',
+  'docs.google.com',
+  'drive.usercontent.google.com',
+  'res.cloudinary.com',
+  ...EXTRA_ALLOWED_VIDEO_HOSTS
+]);
 
 const isAllowedExternalVideoHost = (hostname = '') => {
   const host = hostname.toLowerCase();
-  return host === 'drive.google.com' || host.endsWith('.googleusercontent.com');
+  if (!host) return false;
+
+  if (host.endsWith('.googleusercontent.com')) return true;
+  if (ALLOWED_EXTERNAL_VIDEO_HOSTS.has(host)) return true;
+
+  return EXTRA_ALLOWED_VIDEO_HOSTS.some((allowedHost) => {
+    if (!allowedHost) return false;
+    if (allowedHost.startsWith('*.')) {
+      return host.endsWith(allowedHost.slice(1));
+    }
+    if (allowedHost.startsWith('.')) {
+      return host.endsWith(allowedHost);
+    }
+    return host === allowedHost;
+  });
+};
+
+const extractGoogleDriveFileId = (rawValue = '') => {
+  const trimmed = rawValue.trim();
+  if (!trimmed) return null;
+
+  // Allow admins to paste only the Drive file ID.
+  if (!trimmed.includes('/') && DRIVE_FILE_ID_REGEX.test(trimmed)) {
+    return trimmed;
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  const validHosts = new Set(['drive.google.com', 'docs.google.com', 'drive.usercontent.google.com']);
+  if (!validHosts.has(hostname)) {
+    return null;
+  }
+
+  const idFromPath = parsed.pathname.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if (idFromPath?.[1] && DRIVE_FILE_ID_REGEX.test(idFromPath[1])) {
+    return idFromPath[1];
+  }
+
+  const genericPathId = parsed.pathname.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if (genericPathId?.[1] && DRIVE_FILE_ID_REGEX.test(genericPathId[1])) {
+    return genericPathId[1];
+  }
+
+  const idFromQuery = parsed.searchParams.get('id');
+  if (idFromQuery && DRIVE_FILE_ID_REGEX.test(idFromQuery)) {
+    return idFromQuery;
+  }
+
+  return null;
 };
 
 const normalizeExternalVideoUrl = (rawUrl = '') => {
   const trimmed = rawUrl.trim();
+  if (!trimmed) return trimmed;
+
+  const driveFileId = extractGoogleDriveFileId(trimmed);
+  if (driveFileId) {
+    return `https://drive.google.com/uc?export=download&id=${driveFileId}`;
+  }
 
   let parsed;
   try {
@@ -28,13 +107,13 @@ const normalizeExternalVideoUrl = (rawUrl = '') => {
   if (hostname !== 'drive.google.com') return trimmed;
 
   // Convert common Drive share URLs into a "download" URL.
-  // Note: very large Drive files may still require confirmation.
+  // Note: large Drive files may still require a manual confirmation page.
   const fileMatch = parsed.pathname.match(/^\/file\/d\/([a-zA-Z0-9_-]+)\//);
   if (fileMatch) {
     return `https://drive.google.com/uc?export=download&id=${fileMatch[1]}`;
   }
 
-  if (parsed.pathname === '/open') {
+  if (parsed.pathname === '/open' || parsed.pathname === '/uc') {
     const id = parsed.searchParams.get('id');
     if (id) return `https://drive.google.com/uc?export=download&id=${id}`;
   }
@@ -58,6 +137,14 @@ const proxyRemoteVideo = async (remoteUrl, req, res) => {
       signal: controller.signal,
       headers: req.headers.range ? { Range: req.headers.range } : undefined
     });
+
+    const contentType = (upstream.headers.get('content-type') || '').toLowerCase();
+    if (upstream.ok && contentType.includes('text/html')) {
+      res.status(502).json({
+        message: 'External video link is not directly streamable. Ensure the Google Drive file is public.'
+      });
+      return;
+    }
 
     res.status(upstream.status);
 
@@ -240,7 +327,9 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
       return res.status(404).json({ message: 'Level not found' });
     }
 
+    const oldVideoPath = level.videoPath;
     await level.deleteOne();
+    await removeStoredLocalUpload(oldVideoPath);
 
     // Update course level count
     const totalLevels = await Level.countDocuments({ courseId: level.courseId });
@@ -262,21 +351,37 @@ router.post('/:id/video',
   uploadVideo.single('video'),
   handleUploadError,
   async (req, res) => {
+    let uploadPersisted = false;
     try {
       if (!req.file) {
         return res.status(400).json({ message: 'Please upload a video file' });
       }
 
-      const videoPath = `/uploads/videos/${req.file.filename}`;
-      
-      const level = await Level.findByIdAndUpdate(
-        req.params.id,
-        { videoPath: videoPath },
-        { new: true }
-      );
+      const level = await Level.findById(req.params.id);
+      if (!level) {
+        await discardUploadedTempFile(req.file);
+        return res.status(404).json({ message: 'Level not found' });
+      }
+
+      const localVideoPath = `/uploads/videos/${req.file.filename}`;
+      const persistedVideo = await persistUploadedFile({
+        file: req.file,
+        localPath: localVideoPath,
+        cloudFolder: 'videos',
+        resourceType: 'video'
+      });
+      uploadPersisted = true;
+
+      const previousVideoPath = level.videoPath;
+      level.videoPath = persistedVideo.path;
+      await level.save();
+      await removeStoredLocalUpload(previousVideoPath);
 
       res.json(level);
     } catch (error) {
+      if (req.file && !uploadPersisted) {
+        await discardUploadedTempFile(req.file);
+      }
       console.error('Upload video error:', error);
       res.status(500).json({ message: 'Server error' });
     }
@@ -288,37 +393,37 @@ router.post('/:id/video',
 // @access  Private/Admin
 router.put('/:id/video-link', authenticate, requireAdmin, async (req, res) => {
   try {
-    const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
-    if (!url) {
+    const rawValue = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+    if (!rawValue) {
       return res.status(400).json({ message: 'Video link is required' });
     }
 
-    let parsed;
+    const normalized = normalizeExternalVideoUrl(rawValue);
+
+    let parsedNormalized;
     try {
-      parsed = new URL(url);
+      parsedNormalized = new URL(normalized);
     } catch {
       return res.status(400).json({ message: 'Invalid video link URL' });
     }
 
-    if (!['https:', 'http:'].includes(parsed.protocol)) {
+    if (!['https:', 'http:'].includes(parsedNormalized.protocol)) {
       return res.status(400).json({ message: 'Video link must start with http:// or https://' });
     }
 
-    if (!isAllowedExternalVideoHost(parsed.hostname)) {
-      return res.status(400).json({ message: 'Only Google Drive links are allowed' });
+    if (!isAllowedExternalVideoHost(parsedNormalized.hostname)) {
+      return res.status(400).json({ message: 'Video host is not allowed. Use a Google Drive link.' });
     }
 
-    const normalized = normalizeExternalVideoUrl(url);
-
-    const level = await Level.findByIdAndUpdate(
-      req.params.id,
-      { videoPath: normalized },
-      { new: true, runValidators: true }
-    );
-
+    const level = await Level.findById(req.params.id);
     if (!level) {
       return res.status(404).json({ message: 'Level not found' });
     }
+
+    const previousVideoPath = level.videoPath;
+    level.videoPath = normalized;
+    await level.save();
+    await removeStoredLocalUpload(previousVideoPath);
 
     res.json(level);
   } catch (error) {
@@ -379,7 +484,7 @@ router.get('/:id/stream', authenticate, async (req, res) => {
     }
 
     // External video link support (Google Drive). Proxy so the link is not leaked to clients.
-    if (isExternalUrl(level.videoPath)) {
+    if (isRemoteUrl(level.videoPath)) {
       const normalizedUrl = normalizeExternalVideoUrl(level.videoPath);
 
       let parsed;

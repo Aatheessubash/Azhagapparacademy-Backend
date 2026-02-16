@@ -4,6 +4,11 @@ const mongoose = require('mongoose');
 const { Payment, Course, Progress } = require('../models');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { uploadPaymentProof, handleUploadError } = require('../middleware/upload');
+const {
+  discardUploadedTempFile,
+  persistUploadedFile,
+  removeStoredLocalUpload
+} = require('../utils/mediaStorage');
 
 // Ensure a progress record exists when a payment is approved
 const ensureProgress = async (userId, courseId) => {
@@ -142,40 +147,46 @@ router.post('/',
   ]),
   handleUploadError,
   async (req, res) => {
+    const file = getProofFile(req.files);
+    let uploadPersisted = false;
+
     try {
       const courseId = req.body.courseId?.toString().trim();
       const transactionId = req.body.transactionId?.toString().trim();
-      
-      const file = getProofFile(req.files);
+
       if (!file) {
         return res.status(400).json({ message: 'Proof of payment image is required' });
       }
 
       if (!courseId) {
+        await discardUploadedTempFile(file);
         return res.status(400).json({ message: 'Course ID is required' });
       }
 
       if (!mongoose.Types.ObjectId.isValid(courseId)) {
+        await discardUploadedTempFile(file);
         return res.status(400).json({ message: 'Invalid course ID' });
       }
 
       if (!transactionId) {
+        await discardUploadedTempFile(file);
         return res.status(400).json({ message: 'Transaction ID is required' });
       }
-
-      const proofImage = `/uploads/payment-proofs/${file.filename}`;
 
       // Check if course exists
       const course = await Course.findById(courseId);
       if (!course) {
+        await discardUploadedTempFile(file);
         return res.status(404).json({ message: 'Course not found' });
       }
 
       if (req.userRole !== 'admin' && course.status !== 'published') {
+        await discardUploadedTempFile(file);
         return res.status(404).json({ message: 'Course not found' });
       }
 
       if (course.price === 0) {
+        await discardUploadedTempFile(file);
         return res.status(400).json({ message: 'This course is free. Payment is not required.' });
       }
 
@@ -183,6 +194,7 @@ router.post('/',
         ? Number(req.body.amount)
         : course.price;
       if (!Number.isFinite(amount) || amount <= 0) {
+        await discardUploadedTempFile(file);
         return res.status(400).json({ message: 'Invalid payment amount' });
       }
 
@@ -194,27 +206,41 @@ router.post('/',
 
       if (existingPayment) {
         if (existingPayment.status === 'approved' || existingPayment.status === 'pending') {
+          await discardUploadedTempFile(file);
           return res.status(400).json({
             message: 'You have already submitted a payment for this course'
           });
         }
+      }
 
-        if (existingPayment.status === 'rejected') {
-          existingPayment.transactionId = transactionId;
-          existingPayment.amount = amount;
-          existingPayment.proofImage = proofImage;
-          existingPayment.status = 'pending';
-          existingPayment.rejectionReason = '';
-          existingPayment.notes = '';
-          existingPayment.verifiedBy = null;
-          existingPayment.verifiedAt = null;
+      const localProofPath = `/uploads/payment-proofs/${file.filename}`;
+      const persistedProof = await persistUploadedFile({
+        file,
+        localPath: localProofPath,
+        cloudFolder: 'payment-proofs',
+        resourceType: 'image'
+      });
+      uploadPersisted = true;
 
-          await existingPayment.save();
-          return res.status(200).json({
-            payment: existingPayment,
-            message: 'Payment proof resubmitted successfully'
-          });
-        }
+      const proofImage = persistedProof.path;
+
+      if (existingPayment && existingPayment.status === 'rejected') {
+        const oldProofImage = existingPayment.proofImage;
+        existingPayment.transactionId = transactionId;
+        existingPayment.amount = amount;
+        existingPayment.proofImage = proofImage;
+        existingPayment.status = 'pending';
+        existingPayment.rejectionReason = '';
+        existingPayment.notes = '';
+        existingPayment.verifiedBy = null;
+        existingPayment.verifiedAt = null;
+
+        await existingPayment.save();
+        await removeStoredLocalUpload(oldProofImage);
+        return res.status(200).json({
+          payment: existingPayment,
+          message: 'Payment proof resubmitted successfully'
+        });
       }
 
       const payment = await Payment.create({
@@ -228,6 +254,9 @@ router.post('/',
 
       res.status(201).json({ payment });
     } catch (error) {
+      if (file && !uploadPersisted) {
+        await discardUploadedTempFile(file);
+      }
       console.error('Create payment error:', error);
       if (error?.code === 11000) {
         return res.status(400).json({

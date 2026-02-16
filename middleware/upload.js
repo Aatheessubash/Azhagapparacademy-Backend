@@ -78,11 +78,22 @@ const thumbnailStorage = multer.diskStorage({
 
 // File filter for videos
 const videoFileFilter = (req, file, cb) => {
-  const allowedTypes = /mp4|webm|ogg|mov/;
-  const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-  const mimetype = allowedTypes.test(file.mimetype);
+  const ext = path.extname(file.originalname || '').toLowerCase();
+  const mime = (file.mimetype || '').toLowerCase();
 
-  if (extname && mimetype) {
+  const allowedExtensions = new Set(['.mp4', '.webm', '.ogg', '.ogv', '.mov', '.m4v']);
+  const allowedMimeTypes = new Set([
+    'video/mp4',
+    'video/webm',
+    'video/ogg',
+    'video/quicktime',
+    'video/x-m4v'
+  ]);
+
+  const extAllowed = allowedExtensions.has(ext);
+  const mimeAllowed = allowedMimeTypes.has(mime) || mime.startsWith('video/');
+
+  if (extAllowed && mimeAllowed) {
     return cb(null, true);
   }
   cb(new Error('Only video files (mp4, webm, ogg, mov) are allowed!'));
@@ -90,11 +101,19 @@ const videoFileFilter = (req, file, cb) => {
 
 // File filter for images
 const imageFileFilter = (req, file, cb) => {
-  const allowedTypes = /jpeg|jpg|png|gif|webp/;
-  const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-  const mimetype = allowedTypes.test(file.mimetype);
+  const ext = path.extname(file.originalname || '').toLowerCase();
+  const mime = (file.mimetype || '').toLowerCase();
 
-  if (extname && mimetype) {
+  const allowedExtensions = new Set(['.jpeg', '.jpg', '.png', '.gif', '.webp']);
+  const allowedMimeTypes = new Set([
+    'image/jpeg',
+    'image/jpg',
+    'image/png',
+    'image/gif',
+    'image/webp'
+  ]);
+
+  if (allowedExtensions.has(ext) && allowedMimeTypes.has(mime)) {
     return cb(null, true);
   }
   cb(new Error('Only image files (jpeg, jpg, png, gif, webp) are allowed!'));
