@@ -5,11 +5,114 @@ const { authenticate, requireAdmin } = require('../middleware/auth');
 const { uploadQRCode, uploadThumbnail, handleUploadError } = require('../middleware/upload');
 const {
   discardUploadedTempFile,
+  isRemoteUrl,
   persistUploadedFile,
   removeStoredLocalUpload
 } = require('../utils/mediaStorage');
 
 const YOUTUBE_VIDEO_ID_REGEX = /^[a-zA-Z0-9_-]{11}$/;
+const DRIVE_FILE_ID_REGEX = /^[a-zA-Z0-9_-]{20,}$/;
+
+const EXTRA_ALLOWED_IMAGE_HOSTS = (process.env.ALLOWED_EXTERNAL_IMAGE_HOSTS || '')
+  .split(',')
+  .map((item) => item.trim().toLowerCase())
+  .filter(Boolean);
+
+const ALLOWED_EXTERNAL_IMAGE_HOSTS = new Set([
+  'drive.google.com',
+  'docs.google.com',
+  'drive.usercontent.google.com',
+  'res.cloudinary.com',
+  ...EXTRA_ALLOWED_IMAGE_HOSTS
+]);
+
+const isAllowedExternalImageHost = (hostname = '') => {
+  const host = hostname.toLowerCase();
+  if (!host) return false;
+
+  if (host.endsWith('.googleusercontent.com')) return true;
+  if (ALLOWED_EXTERNAL_IMAGE_HOSTS.has(host)) return true;
+
+  return EXTRA_ALLOWED_IMAGE_HOSTS.some((allowedHost) => {
+    if (!allowedHost) return false;
+    if (allowedHost.startsWith('*.')) {
+      return host.endsWith(allowedHost.slice(1));
+    }
+    if (allowedHost.startsWith('.')) {
+      return host.endsWith(allowedHost);
+    }
+    return host === allowedHost;
+  });
+};
+
+const extractGoogleDriveFileId = (rawValue = '') => {
+  const trimmed = rawValue.trim();
+  if (!trimmed) return null;
+
+  if (!trimmed.includes('/') && DRIVE_FILE_ID_REGEX.test(trimmed)) {
+    return trimmed;
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  const validHosts = new Set(['drive.google.com', 'docs.google.com', 'drive.usercontent.google.com']);
+  if (!validHosts.has(hostname)) {
+    return null;
+  }
+
+  const idFromPath = parsed.pathname.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if (idFromPath?.[1] && DRIVE_FILE_ID_REGEX.test(idFromPath[1])) {
+    return idFromPath[1];
+  }
+
+  const genericPathId = parsed.pathname.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if (genericPathId?.[1] && DRIVE_FILE_ID_REGEX.test(genericPathId[1])) {
+    return genericPathId[1];
+  }
+
+  const idFromQuery = parsed.searchParams.get('id');
+  if (idFromQuery && DRIVE_FILE_ID_REGEX.test(idFromQuery)) {
+    return idFromQuery;
+  }
+
+  return null;
+};
+
+const normalizeExternalImageUrl = (rawUrl = '') => {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return trimmed;
+
+  const driveFileId = extractGoogleDriveFileId(trimmed);
+  if (driveFileId) {
+    return `https://drive.google.com/uc?export=view&id=${driveFileId}`;
+  }
+
+  return trimmed;
+};
+
+const verifyAdminPassword = async (adminId, adminPassword) => {
+  if (!adminPassword || typeof adminPassword !== 'string') {
+    return { ok: false, status: 400, message: 'Admin password is required to change QR code' };
+  }
+
+  const adminUser = await User.findById(adminId).select('+password');
+  if (!adminUser) {
+    return { ok: false, status: 404, message: 'Admin user not found' };
+  }
+
+  const isPasswordValid = await adminUser.comparePassword(adminPassword);
+  if (!isPasswordValid) {
+    return { ok: false, status: 401, message: 'Invalid admin password' };
+  }
+
+  return { ok: true };
+};
 
 const extractYouTubeVideoId = (value) => {
   const trimmed = value.trim();
@@ -355,22 +458,10 @@ router.post('/:id/qr-code',
         return res.status(404).json({ message: 'Course not found' });
       }
 
-      const { adminPassword } = req.body;
-      if (!adminPassword || typeof adminPassword !== 'string') {
+      const passwordCheck = await verifyAdminPassword(req.user._id, req.body?.adminPassword);
+      if (!passwordCheck.ok) {
         await discardUploadedTempFile(req.file);
-        return res.status(400).json({ message: 'Admin password is required to change QR code' });
-      }
-
-      const adminUser = await User.findById(req.user._id).select('+password');
-      if (!adminUser) {
-        await discardUploadedTempFile(req.file);
-        return res.status(404).json({ message: 'Admin user not found' });
-      }
-
-      const isPasswordValid = await adminUser.comparePassword(adminPassword);
-      if (!isPasswordValid) {
-        await discardUploadedTempFile(req.file);
-        return res.status(401).json({ message: 'Invalid admin password' });
+        return res.status(passwordCheck.status).json({ message: passwordCheck.message });
       }
 
       const localQrCodePath = `/uploads/qr-codes/${req.file.filename}`;
@@ -393,6 +484,62 @@ router.post('/:id/qr-code',
         await discardUploadedTempFile(req.file);
       }
       console.error('Upload QR code error:', error);
+      res.status(500).json({ message: 'Server error' });
+    }
+  }
+);
+
+// @route   PUT /courses/:id/qr-code-link
+// @desc    Set course QR code image from external link (Google Drive supported)
+// @access  Private/Admin
+router.put('/:id/qr-code-link',
+  authenticate,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const course = await Course.findById(req.params.id);
+      if (!course) {
+        return res.status(404).json({ message: 'Course not found' });
+      }
+
+      const passwordCheck = await verifyAdminPassword(req.user._id, req.body?.adminPassword);
+      if (!passwordCheck.ok) {
+        return res.status(passwordCheck.status).json({ message: passwordCheck.message });
+      }
+
+      const rawUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+      if (!rawUrl) {
+        return res.status(400).json({ message: 'QR image link is required' });
+      }
+
+      const normalized = normalizeExternalImageUrl(rawUrl);
+      let parsed;
+      try {
+        parsed = new URL(normalized);
+      } catch {
+        return res.status(400).json({ message: 'Invalid QR image link URL' });
+      }
+
+      if (!['https:', 'http:'].includes(parsed.protocol)) {
+        return res.status(400).json({ message: 'QR image link must start with http:// or https://' });
+      }
+
+      if (!isAllowedExternalImageHost(parsed.hostname)) {
+        return res.status(400).json({ message: 'Only Google Drive image links are allowed' });
+      }
+
+      const oldQrCodePath = course.qrCodeImage;
+      course.qrCodeImage = normalized;
+      await course.save();
+
+      // Clean up only when the old value points to a local upload.
+      if (!isRemoteUrl(oldQrCodePath)) {
+        await removeStoredLocalUpload(oldQrCodePath);
+      }
+
+      res.json(course);
+    } catch (error) {
+      console.error('Set QR code link error:', error);
       res.status(500).json({ message: 'Server error' });
     }
   }
