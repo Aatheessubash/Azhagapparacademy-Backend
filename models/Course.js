@@ -31,7 +31,7 @@ const courseSchema = new mongoose.Schema({
   paymentUpiId: {
     type: String,
     trim: true,
-    default: null
+    default: '772-2@oksbi'
   },
   paymentReceiverName: {
     type: String,

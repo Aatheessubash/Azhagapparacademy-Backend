@@ -14,6 +14,8 @@ const YOUTUBE_VIDEO_ID_REGEX = /^[a-zA-Z0-9_-]{11}$/;
 const DRIVE_FILE_ID_REGEX = /^[a-zA-Z0-9_-]{20,}$/;
 const UPI_ID_REGEX = /^[a-zA-Z0-9._-]{2,256}@[a-zA-Z]{2,64}$/;
 
+const DEFAULT_UPI_ID = '772-2@oksbi';
+
 const EXTRA_ALLOWED_IMAGE_HOSTS = (process.env.ALLOWED_EXTERNAL_IMAGE_HOSTS || '')
   .split(',')
   .map((item) => item.trim().toLowerCase())
@@ -230,6 +232,17 @@ const parsePaymentUpiConfig = ({ paymentUpiId, paymentReceiverName }) => {
   };
 };
 
+const resolvePaymentUpiDefaults = (courseObj = {}) => {
+  const upiId = (courseObj.paymentUpiId || '').toString().trim();
+  if (!upiId) {
+    return {
+      ...courseObj,
+      paymentUpiId: DEFAULT_UPI_ID
+    };
+  }
+  return courseObj;
+};
+
 
 // @route   GET /courses
 // @desc    Get all courses with optional filtering
@@ -275,7 +288,7 @@ router.get('/', authenticate, async (req, res) => {
           (payment && payment.status === 'approved');
 
         return {
-          ...courseObj,
+          ...resolvePaymentUpiDefaults(courseObj),
           // Only return the YouTube embed URL after the course is unlocked.
           // This keeps it hidden for unpaid users (UI also gates it).
           youtubeEmbedUrl: hasAccess ? courseObj.youtubeEmbedUrl : null,
@@ -347,7 +360,7 @@ router.get('/:id', authenticate, async (req, res) => {
     }));
 
     const courseResponse = {
-      ...course.toObject(),
+      ...resolvePaymentUpiDefaults(course.toObject()),
       // Only return YouTube embed URL after unlock (paid/free/admin).
       youtubeEmbedUrl: hasAccess ? course.youtubeEmbedUrl : null,
       levels: safeLevels,
@@ -407,6 +420,8 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       return res.status(400).json({ message: 'UPI ID is required when receiver name is provided' });
     }
 
+    const resolvedPaymentUpiId = parsedUpiConfig.paymentUpiId || DEFAULT_UPI_ID;
+
     const allowedStatuses = ['draft', 'published', 'archived'];
     const safeStatus = allowedStatuses.includes(status) ? status : 'draft';
 
@@ -416,7 +431,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       price: numericPrice,
       quizEnabled: quizEnabled || false,
       youtubeEmbedUrl: parsedYouTube.hasValue ? parsedYouTube.url : null,
-      paymentUpiId: parsedUpiConfig.paymentUpiId || null,
+      paymentUpiId: resolvedPaymentUpiId,
       paymentReceiverName: parsedUpiConfig.paymentReceiverName || null,
       status: safeStatus // Default to draft unless explicitly provided
     });
@@ -472,7 +487,7 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
     }
 
     if (parsedUpiConfig.paymentUpiId !== undefined) {
-      updates.paymentUpiId = parsedUpiConfig.paymentUpiId;
+      updates.paymentUpiId = parsedUpiConfig.paymentUpiId || DEFAULT_UPI_ID;
       // Clearing UPI ID should also clear receiver name unless explicitly updated.
       if (parsedUpiConfig.paymentUpiId === null && parsedUpiConfig.paymentReceiverName === undefined) {
         updates.paymentReceiverName = null;
