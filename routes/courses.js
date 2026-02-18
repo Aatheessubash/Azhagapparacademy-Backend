@@ -12,6 +12,7 @@ const {
 
 const YOUTUBE_VIDEO_ID_REGEX = /^[a-zA-Z0-9_-]{11}$/;
 const DRIVE_FILE_ID_REGEX = /^[a-zA-Z0-9_-]{20,}$/;
+const UPI_ID_REGEX = /^[a-zA-Z0-9._-]{2,256}@[a-zA-Z]{2,64}$/;
 
 const EXTRA_ALLOWED_IMAGE_HOSTS = (process.env.ALLOWED_EXTERNAL_IMAGE_HOSTS || '')
   .split(',')
@@ -183,6 +184,52 @@ const parseYouTubeEmbedUrl = (value) => {
   };
 };
 
+const normalizeOptionalString = (value, fieldName, maxLength = 200) => {
+  if (value === undefined) {
+    return { hasValue: false };
+  }
+
+  if (value === null) {
+    return { hasValue: true, value: null };
+  }
+
+  if (typeof value !== 'string') {
+    return { hasValue: true, error: `${fieldName} must be a string` };
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return { hasValue: true, value: null };
+  }
+
+  if (trimmed.length > maxLength) {
+    return { hasValue: true, error: `${fieldName} cannot exceed ${maxLength} characters` };
+  }
+
+  return { hasValue: true, value: trimmed };
+};
+
+const parsePaymentUpiConfig = ({ paymentUpiId, paymentReceiverName }) => {
+  const parsedUpiId = normalizeOptionalString(paymentUpiId, 'UPI ID', 120);
+  if (parsedUpiId.error) {
+    return { error: parsedUpiId.error };
+  }
+
+  const parsedReceiverName = normalizeOptionalString(paymentReceiverName, 'Receiver name', 120);
+  if (parsedReceiverName.error) {
+    return { error: parsedReceiverName.error };
+  }
+
+  if (parsedUpiId.hasValue && parsedUpiId.value && !UPI_ID_REGEX.test(parsedUpiId.value)) {
+    return { error: 'Invalid UPI ID. Example format: username@bank' };
+  }
+
+  return {
+    paymentUpiId: parsedUpiId.hasValue ? parsedUpiId.value : undefined,
+    paymentReceiverName: parsedReceiverName.hasValue ? parsedReceiverName.value : undefined
+  };
+};
+
 
 // @route   GET /courses
 // @desc    Get all courses with optional filtering
@@ -324,7 +371,16 @@ router.get('/:id', authenticate, async (req, res) => {
 // @access  Private/Admin
 router.post('/', authenticate, requireAdmin, async (req, res) => {
   try {
-    const { title, description, price, quizEnabled, status, youtubeEmbedUrl } = req.body;
+    const {
+      title,
+      description,
+      price,
+      quizEnabled,
+      status,
+      youtubeEmbedUrl,
+      paymentUpiId,
+      paymentReceiverName
+    } = req.body;
 
     const safeTitle = typeof title === 'string' ? title.trim() : '';
     const safeDescription = typeof description === 'string' ? description.trim() : '';
@@ -342,6 +398,15 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       return res.status(400).json({ message: parsedYouTube.error });
     }
 
+    const parsedUpiConfig = parsePaymentUpiConfig({ paymentUpiId, paymentReceiverName });
+    if (parsedUpiConfig.error) {
+      return res.status(400).json({ message: parsedUpiConfig.error });
+    }
+
+    if (!parsedUpiConfig.paymentUpiId && parsedUpiConfig.paymentReceiverName) {
+      return res.status(400).json({ message: 'UPI ID is required when receiver name is provided' });
+    }
+
     const allowedStatuses = ['draft', 'published', 'archived'];
     const safeStatus = allowedStatuses.includes(status) ? status : 'draft';
 
@@ -351,6 +416,8 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       price: numericPrice,
       quizEnabled: quizEnabled || false,
       youtubeEmbedUrl: parsedYouTube.hasValue ? parsedYouTube.url : null,
+      paymentUpiId: parsedUpiConfig.paymentUpiId || null,
+      paymentReceiverName: parsedUpiConfig.paymentReceiverName || null,
       status: safeStatus // Default to draft unless explicitly provided
     });
 
@@ -371,6 +438,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
 router.put('/:id', authenticate, requireAdmin, async (req, res) => {
   try {
     const updates = { ...req.body };
+    let existingCourseForValidation = null;
 
     const parsedYouTube = parseYouTubeEmbedUrl(updates.youtubeEmbedUrl);
     if (parsedYouTube.error) {
@@ -392,6 +460,43 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
       const allowedStatuses = ['draft', 'published', 'archived'];
       if (!allowedStatuses.includes(updates.status)) {
         return res.status(400).json({ message: 'Invalid status value' });
+      }
+    }
+
+    const parsedUpiConfig = parsePaymentUpiConfig({
+      paymentUpiId: updates.paymentUpiId,
+      paymentReceiverName: updates.paymentReceiverName
+    });
+    if (parsedUpiConfig.error) {
+      return res.status(400).json({ message: parsedUpiConfig.error });
+    }
+
+    if (parsedUpiConfig.paymentUpiId !== undefined) {
+      updates.paymentUpiId = parsedUpiConfig.paymentUpiId;
+      // Clearing UPI ID should also clear receiver name unless explicitly updated.
+      if (parsedUpiConfig.paymentUpiId === null && parsedUpiConfig.paymentReceiverName === undefined) {
+        updates.paymentReceiverName = null;
+      }
+    }
+    if (parsedUpiConfig.paymentReceiverName !== undefined) {
+      updates.paymentReceiverName = parsedUpiConfig.paymentReceiverName;
+    }
+
+    if (
+      parsedUpiConfig.paymentReceiverName !== undefined &&
+      parsedUpiConfig.paymentReceiverName !== null
+    ) {
+      const upiIdFromPayload = parsedUpiConfig.paymentUpiId !== undefined
+        ? parsedUpiConfig.paymentUpiId
+        : null;
+      if (!upiIdFromPayload) {
+        existingCourseForValidation = await Course.findById(req.params.id).select('paymentUpiId');
+        if (!existingCourseForValidation) {
+          return res.status(404).json({ message: 'Course not found' });
+        }
+        if (!existingCourseForValidation.paymentUpiId) {
+          return res.status(400).json({ message: 'UPI ID is required when receiver name is provided' });
+        }
       }
     }
 

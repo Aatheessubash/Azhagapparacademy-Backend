@@ -28,6 +28,16 @@ const courseSchema = new mongoose.Schema({
     type: String, // Path to QR code image
     default: null
   },
+  paymentUpiId: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  paymentReceiverName: {
+    type: String,
+    trim: true,
+    default: null
+  },
   quizEnabled: {
     type: Boolean,
     default: false
