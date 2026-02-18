@@ -8,12 +8,26 @@ try {
   cloudinaryClient = null;
 }
 
-const cloudinaryCloudName = (process.env.CLOUDINARY_CLOUD_NAME || '').trim();
-const cloudinaryApiKey = (process.env.CLOUDINARY_API_KEY || '').trim();
-const cloudinaryApiSecret = (process.env.CLOUDINARY_API_SECRET || '').trim();
+const cloudinaryCloudName = (
+  process.env.CLOUDINARY_CLOUD_NAME ||
+  process.env.CLOUD_NAME ||
+  ''
+).trim();
+const cloudinaryApiKey = (
+  process.env.CLOUDINARY_API_KEY ||
+  process.env.API_KEY ||
+  ''
+).trim();
+const cloudinaryApiSecret = (
+  process.env.CLOUDINARY_API_SECRET ||
+  process.env.API_SECRET ||
+  ''
+).trim();
 const cloudinaryUploadRoot = (process.env.CLOUDINARY_UPLOAD_ROOT || 'video-learning-platform')
   .trim()
   .replace(/^\/+|\/+$/g, '');
+const requireCloudStorage = process.env.REQUIRE_CLOUD_STORAGE !== 'false';
+const isProduction = process.env.NODE_ENV === 'production';
 
 const cloudinaryConfigured = Boolean(
   cloudinaryClient &&
@@ -78,6 +92,11 @@ const persistUploadedFile = async ({
   }
 
   if (!cloudinaryConfigured || !cloudinaryClient) {
+    if (isProduction && requireCloudStorage) {
+      throw new Error(
+        'Cloudinary is not configured in production. Set CLOUDINARY_CLOUD_NAME/CLOUDINARY_API_KEY/CLOUDINARY_API_SECRET (or CLOUD_NAME/API_KEY/API_SECRET).'
+      );
+    }
     return {
       path: localPath,
       provider: 'local'

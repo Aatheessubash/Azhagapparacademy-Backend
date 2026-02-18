@@ -20,7 +20,10 @@ app.use('/uploads/thumbnails', express.static(path.join(__dirname, 'uploads/thum
 app.use('/uploads/payment-proofs', express.static(path.join(__dirname, 'uploads/payment-proofs')));
 
 // Database Connection
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/video-learning-platform';
+const MONGODB_URI =
+  process.env.MONGODB_URI ||
+  process.env.MONGO_URI ||
+  'mongodb://localhost:27017/video-learning-platform';
 const MONGO_SERVER_SELECTION_TIMEOUT_MS = Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS) || 10000;
 
 // Fail fast if MongoDB is unreachable (avoid hanging requests from buffered ops).
