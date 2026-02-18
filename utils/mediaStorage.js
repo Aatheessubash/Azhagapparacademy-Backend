@@ -8,21 +8,47 @@ try {
   cloudinaryClient = null;
 }
 
+const parseCloudinaryUrl = () => {
+  const raw = (process.env.CLOUDINARY_URL || '').trim();
+  if (!raw) return null;
+
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'cloudinary:') return null;
+
+    const cloudName = (parsed.hostname || '').trim();
+    const apiKey = (parsed.username || '').trim();
+    const apiSecret = (parsed.password || '').trim();
+
+    if (!cloudName || !apiKey || !apiSecret) return null;
+
+    return {
+      cloudName,
+      apiKey,
+      apiSecret
+    };
+  } catch {
+    return null;
+  }
+};
+
+const cloudinaryUrlConfig = parseCloudinaryUrl();
+
 const cloudinaryCloudName = (
   process.env.CLOUDINARY_CLOUD_NAME ||
   process.env.CLOUD_NAME ||
   ''
-).trim();
+).trim() || cloudinaryUrlConfig?.cloudName || '';
 const cloudinaryApiKey = (
   process.env.CLOUDINARY_API_KEY ||
   process.env.API_KEY ||
   ''
-).trim();
+).trim() || cloudinaryUrlConfig?.apiKey || '';
 const cloudinaryApiSecret = (
   process.env.CLOUDINARY_API_SECRET ||
   process.env.API_SECRET ||
   ''
-).trim();
+).trim() || cloudinaryUrlConfig?.apiSecret || '';
 const cloudinaryUploadRoot = (process.env.CLOUDINARY_UPLOAD_ROOT || 'video-learning-platform')
   .trim()
   .replace(/^\/+|\/+$/g, '');
@@ -94,7 +120,7 @@ const persistUploadedFile = async ({
   if (!cloudinaryConfigured || !cloudinaryClient) {
     if (isProduction && requireCloudStorage) {
       throw new Error(
-        'Cloudinary is not configured in production. Set CLOUDINARY_CLOUD_NAME/CLOUDINARY_API_KEY/CLOUDINARY_API_SECRET (or CLOUD_NAME/API_KEY/API_SECRET).'
+        'Cloudinary is not configured in production. Set CLOUDINARY_URL or CLOUDINARY_CLOUD_NAME/CLOUDINARY_API_KEY/CLOUDINARY_API_SECRET.'
       );
     }
     return {
@@ -109,7 +135,8 @@ const persistUploadedFile = async ({
       resource_type: resourceType,
       use_filename: true,
       unique_filename: true,
-      overwrite: false
+      overwrite: false,
+      chunk_size: resourceType === 'video' ? 6000000 : undefined
     };
 
     const shouldUseLargeUpload = resourceType === 'video' || Number(file.size) > 100 * 1024 * 1024;
