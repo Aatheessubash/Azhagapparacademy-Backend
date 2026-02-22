@@ -13,8 +13,11 @@ const {
 const YOUTUBE_VIDEO_ID_REGEX = /^[a-zA-Z0-9_-]{11}$/;
 const DRIVE_FILE_ID_REGEX = /^[a-zA-Z0-9_-]{20,}$/;
 const UPI_ID_REGEX = /^[a-zA-Z0-9._-]{2,256}@[a-zA-Z]{2,64}$/;
+const LEGACY_DEFAULT_UPI_ID = '772-2@oksbi';
 
-const DEFAULT_UPI_ID = '772-2@oksbi';
+const DEFAULT_UPI_ID = (process.env.DEFAULT_PAYMENT_UPI_ID || 'sivasurya772-2@oksbi').trim();
+const DEFAULT_UPI_RECEIVER_NAME = (process.env.DEFAULT_PAYMENT_RECEIVER_NAME || 'Siva Suriyan').trim();
+const DEFAULT_PAYMENT_QR_IMAGE = (process.env.DEFAULT_PAYMENT_QR_IMAGE || '').trim();
 
 const EXTRA_ALLOWED_IMAGE_HOSTS = (process.env.ALLOWED_EXTERNAL_IMAGE_HOSTS || '')
   .split(',')
@@ -232,15 +235,31 @@ const parsePaymentUpiConfig = ({ paymentUpiId, paymentReceiverName }) => {
   };
 };
 
-const resolvePaymentUpiDefaults = (courseObj = {}) => {
-  const upiId = (courseObj.paymentUpiId || '').toString().trim();
-  if (!upiId) {
-    return {
-      ...courseObj,
-      paymentUpiId: DEFAULT_UPI_ID
-    };
-  }
-  return courseObj;
+const buildGeneratedQrImageUrl = ({ upiId, receiverName }) => {
+  const safeUpiId = (upiId || '').trim();
+  if (!safeUpiId) return null;
+
+  const safeReceiverName = (receiverName || '').trim() || 'UPI Payment';
+  const payload = `upi://pay?pa=${safeUpiId}&pn=${safeReceiverName}&cu=INR`;
+  return `https://api.qrserver.com/v1/create-qr-code/?size=1024x1024&format=png&data=${encodeURIComponent(payload)}`;
+};
+
+const resolvePaymentDefaults = (courseObj = {}) => {
+  const rawUpiId = (courseObj.paymentUpiId || '').toString().trim();
+  const upiId = !rawUpiId || rawUpiId === LEGACY_DEFAULT_UPI_ID ? DEFAULT_UPI_ID : rawUpiId;
+  const receiverName = (courseObj.paymentReceiverName || '').toString().trim() || DEFAULT_UPI_RECEIVER_NAME;
+
+  const qrCodeImage =
+    (courseObj.qrCodeImage || '').toString().trim() ||
+    DEFAULT_PAYMENT_QR_IMAGE ||
+    buildGeneratedQrImageUrl({ upiId, receiverName });
+
+  return {
+    ...courseObj,
+    paymentUpiId: upiId || null,
+    paymentReceiverName: receiverName || null,
+    qrCodeImage: qrCodeImage || null
+  };
 };
 
 
@@ -288,7 +307,7 @@ router.get('/', authenticate, async (req, res) => {
           (payment && payment.status === 'approved');
 
         return {
-          ...resolvePaymentUpiDefaults(courseObj),
+          ...resolvePaymentDefaults(courseObj),
           // Only return the YouTube embed URL after the course is unlocked.
           // This keeps it hidden for unpaid users (UI also gates it).
           youtubeEmbedUrl: hasAccess ? courseObj.youtubeEmbedUrl : null,
@@ -360,7 +379,7 @@ router.get('/:id', authenticate, async (req, res) => {
     }));
 
     const courseResponse = {
-      ...resolvePaymentUpiDefaults(course.toObject()),
+      ...resolvePaymentDefaults(course.toObject()),
       // Only return YouTube embed URL after unlock (paid/free/admin).
       youtubeEmbedUrl: hasAccess ? course.youtubeEmbedUrl : null,
       levels: safeLevels,
