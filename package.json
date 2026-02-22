@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "seed": "node scripts/seed.js"
+    "seed": "node scripts/seed.js",
+    "reset-password": "node scripts/resetPasswordWithKey.js reset",
+    "verify-password": "node scripts/resetPasswordWithKey.js verify"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
